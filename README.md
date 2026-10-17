@@ -147,7 +147,7 @@ identity map additionally writes a `.gitignore` (`*`) next to itself.
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v     # 43 tests, zero dependencies
+PYTHONPATH=src python -m unittest discover -s tests -v     # 56 tests, zero dependencies
 ```
 
 Coverage is weighted toward the failures that would be *lies* rather than
