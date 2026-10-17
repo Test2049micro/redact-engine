@@ -14,7 +14,9 @@ address, phone number, verification code and half-typed message in the file.
 
 ```
 $ redact-engine project --key alias.key --source examples/events.jsonl --out out --verify
-{"events": 3, "aliasing": "stable", "redactions": {"credential": 1, "email": 1, "number_long": 1, "otp": 1, "phone_cn": 1}}
+{"events": 3, "sources": ["events.jsonl"], "source_count": 1, "aliasing": "stable",
+ "redactions": {"credential": 1, "email": 1, "number_long": 1, "otp": 1, "phone_cn": 1},
+ "coverage_assessed": false}
 
 out/safe/events.jsonl   (dir 0700, file 0600)
 {"timestamp": "2026-10-17T09:00:00", "app": "com.example.mail", "text": "reply to [email-3c97d63a591c] about the invoice for order [number_long-3e0f158ffb15]"}
@@ -22,8 +24,9 @@ out/safe/events.jsonl   (dir 0700, file 0600)
 {"timestamp": "2026-10-17T09:10:00", "app": "com.example.ide", "text": "refactored src/parser.py, nothing personal; token [credential-42e9b4a3940b]"}
 ```
 
-Note what did *not* survive: nothing. Note what did: the shape of each secret,
-via its kind label. That is the trade this engine makes deliberately -- a reader
+Note what did not survive: nothing. Note what did: the shape of each secret, via
+its kind label -- and the alias hashes themselves, which are only meaningful with
+your key. That is the trade this engine makes deliberately -- a reader
 must be able to tell "there was a verification code here" from "there was nothing
 here", or the projection stops being evidence about your own history.
 
@@ -124,6 +127,9 @@ identity map additionally writes a `.gitignore` (`*`) next to itself.
 
 ## Limits, stated plainly
 
+- **`--verify` proves only that matched values are gone.** It cannot prove that
+  everything sensitive was *matched*. With rules narrowed it fails loudly; with
+  rules at full strength it can still miss prose that is itself the secret.
 - **Recall is the real risk, and regex recall is bounded.** A name written without
   an honorific, a phone number spelled with spaces or full-width digits, prose
   that *is* the sensitive content — none of these are caught by shape matching.

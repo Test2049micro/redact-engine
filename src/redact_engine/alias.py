@@ -66,7 +66,12 @@ def _assert_usable(path: Path) -> None:
 def load_key(path: str | Path) -> bytes:
     target = Path(path).expanduser()
     _assert_usable(target)
-    data = target.read_bytes()
+    descriptor = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            data = handle.read()
+    finally:
+        pass
     if len(data) < KEY_BYTES:
         raise InsecureKeyFile(f"key file is too short to be a key: {target}")
     return data
@@ -79,7 +84,8 @@ def create_key(path: str | Path, *, overwrite: bool = False) -> bytes:
     if target.exists() and not overwrite:
         raise InsecureKeyFile(f"key already exists, refusing to replace it: {target}")
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
     key = new_key()
     try:
         with os.fdopen(descriptor, "wb") as handle:

@@ -23,8 +23,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from .alias import InsecureKeyFile, load_or_create
-from .projection import DEFAULT_FIELDS, Redactor, assert_no_leaks
+from .alias import InsecureKeyFile, load_or_create, new_key
+from .projection import DEFAULT_FIELDS, Redactor, leaked_kinds
 from .rules import DEFAULT_RULES, rules_for, zh_cue_rules
 from .sources import UnsafeSource, discover_segment_files, events_from_jsonl
 
@@ -33,9 +33,20 @@ CONSENTED_DIR = "consented"
 
 
 def _private_dir(path: Path) -> Path:
+    """Create a directory with owner-only mode, and only tighten what we created.
+
+    An existing directory handed to us is not ours to re-permission: ``--out .`` or
+    an identity map written next to the source would otherwise chmod the caller's
+    working directory (possibly the home directory) to 0700 and break unrelated
+    software.
+    """
     if path.is_symlink():
         raise UnsafeSource(f"refusing symlinked output directory: {path}")
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.exists():
+        if not path.is_dir():
+            raise UnsafeSource(f"not a directory: {path}")
+        return path
+    path.mkdir(parents=True, mode=0o700)
     os.chmod(path, 0o700)
     return path
 
@@ -86,12 +97,16 @@ def cmd_redact_text(args: argparse.Namespace) -> int:
 
 
 def cmd_project(args: argparse.Namespace) -> int:
+    # validated before anything is opened: the identity map is written lazily as
+    # subjects are encountered, so a bare filename would create it in the caller's
+    # working directory *before* any end-of-command check could object
+    identity_target = _identity_target(args.identity_map) if args.identity_map else None
     key, created = load_or_create(args.key)
     redactor = Redactor(
         key,
         _build_rules(args),
         stable=not args.unstable,
-        persist_map=Path(args.identity_map) if args.identity_map else None,
+        persist_map=identity_target,
     )
     mapping = _load_mapping(args.mapping)
     fields = tuple(args.fields.split(",")) if args.fields else DEFAULT_FIELDS
@@ -119,12 +134,22 @@ def cmd_project(args: argparse.Namespace) -> int:
     events_path = safe / "events.jsonl"
     if events_path.is_symlink():
         raise UnsafeSource(f"refusing symlinked output: {events_path}")
+    # --verify must not inherit --kind's narrowing: an auditor with the full
+    # default rule set harvests candidate secrets from the *input*, so narrowing
+    # the active rules makes verification fail instead of quietly passing
+    audit_rules = tuple(DEFAULT_RULES) + (zh_cue_rules() if args.zh_cues else ())
+    auditor = Redactor(new_key(), audit_rules, stable=False)
+
     written = 0
     events_path.unlink(missing_ok=True)
     descriptor = os.open(str(events_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
         for source in sources:
             for event in events_from_jsonl(source, mapping, limit=args.limit):
+                for name in fields:
+                    value = event.get(name)
+                    if isinstance(value, str):
+                        auditor.redact(value)
                 projected = redactor.project(event, fields)
                 if not projected:
                     continue
@@ -138,7 +163,8 @@ def cmd_project(args: argparse.Namespace) -> int:
 
     payload = {
         "events": written,
-        "sources": [str(s) for s in sources],
+        "sources": sorted({s.name for s in sources}),
+        "source_count": len(sources),
         "fields": list(fields),
         "aliasing": "per-run" if args.unstable else "stable",
         "identity_map": bool(args.identity_map),
@@ -151,17 +177,40 @@ def cmd_project(args: argparse.Namespace) -> int:
     summary.unlink(missing_ok=True)
     _write_private(summary, json.dumps(payload, ensure_ascii=False, indent=1))
 
-    if args.identity_map:
-        target = Path(args.identity_map)
-        _private_dir(target.parent)
-        _guard_repo(target.parent)
+    if identity_target is not None:
+        _guard_repo(identity_target.parent)
 
     if args.verify:
         body = events_path.read_text(encoding="utf-8")
-        assert_no_leaks(body, redactor.seen_values)
+        kinds = leaked_kinds(body, auditor.all_hits)
+        if kinds:
+            # the projection is unsafe: keep it on disk and report a pass would be
+            # the exact inverse of what --verify is for
+            events_path.unlink(missing_ok=True)
+            summary.unlink(missing_ok=True)
+            total = sum(kinds.values())
+            print(f"LEAK CHECK FAILED: {total} value(s) survived with the active rules: "
+                  f"{', '.join(f'{k} x{n}' for k, n in sorted(kinds.items()))}. "
+                  "Output removed. Widen --kind or drop the narrowing.", file=sys.stderr)
+            return 5
 
     print(json.dumps(payload, ensure_ascii=False))
     return 0
+
+
+def _identity_target(raw: str) -> Path:
+    """The reversible map needs an explicit directory, not a bare filename.
+
+    A bare name resolves to the current working directory, and this command would
+    then create-or-tighten that directory and drop a .gitignore into it -- silently
+    re-permissioning wherever the operator happened to be standing.
+    """
+    target = Path(raw).expanduser()
+    if str(target.parent) in ("", "."):
+        raise ValueError("--identity-map needs a path with a directory component, "
+                         f"got {raw!r} (it would land in the current directory)")
+    _private_dir(target.parent)
+    return target
 
 
 def _guard_repo(directory: Path) -> None:
@@ -226,7 +275,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except AssertionError as exc:
         print(f"LEAK CHECK FAILED: {exc}", file=sys.stderr)
         return 5
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 6
 

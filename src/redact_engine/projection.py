@@ -22,7 +22,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .alias import check_key, make_alias
+from .alias import check_key, make_alias, new_key
 from .rules import DEFAULT_RULES, Rule
 
 DEFAULT_FIELDS = ("timestamp", "app", "text")
@@ -77,6 +77,7 @@ class Redactor:
         self.rules = tuple(rules)
         self.persist_map = persist_map
         self.seen_values: list[str] = []
+        self.all_hits: list[Hit] = []
         self.hit_counts: dict[str, int] = {}
         self._mapping: dict[tuple[str, str], str] = {}
         if persist_map is not None:
@@ -107,7 +108,10 @@ class Redactor:
             return
         if not stat.S_ISREG(target.stat().st_mode):
             raise ValueError(f"identity map is not a regular file: {target}")
-        for row in json.loads(target.read_text(encoding="utf-8")):
+        descriptor = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            rows = json.loads(handle.read())
+        for row in rows:
             self._mapping[(row["kind"], row["value"])] = row["alias"]
 
     def _append_map(self, token: tuple[str, str], label: str) -> None:
@@ -116,7 +120,10 @@ class Redactor:
         if target.is_symlink():
             raise ValueError(f"refusing to write an identity map through a symlink: {target}")
         rows = [dict(kind=k, value=v, alias=a) for (k, v), a in self._mapping.items()]
-        descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # O_NOFOLLOW closes the check-then-use window: a symlink planted between the
+        # existence check and this open would otherwise overwrite any file the user
+        # can write, with the *full* identity map
+        descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(rows, handle, ensure_ascii=False, indent=1)
         os.chmod(target, 0o600)
@@ -142,6 +149,7 @@ class Redactor:
             out = out[:start] + label + out[end:]
         for hit in hits:
             self.seen_values.append(hit.value)
+            self.all_hits.append(hit)
             self.hit_counts[hit.kind] = self.hit_counts.get(hit.kind, 0) + 1
         return Result(text=out, hits=hits)
 
@@ -157,20 +165,57 @@ class Redactor:
             if name not in event:
                 continue
             value = event[name]
-            out[name] = self.redact(value).text if isinstance(value, str) else value
+            if isinstance(value, (int, float, bool)) or value is None:
+                out[name] = value
+            else:
+                # a dict/list is exactly where a recorder hides the sensitive part
+                # (a nested note, a title, an ax blob), so it is flattened and then
+                # redacted rather than serialised as-is
+                out[name] = self.redact(_flatten(value)).text
         return out
+
+
+_FLATTEN_LIMIT = 2000
+
+
+def _flatten(value: object, limit: int = _FLATTEN_LIMIT) -> str:
+    """Join nested structures into one redactable string.
+
+    Kept local rather than importing the reader's helper: whatever arrives here
+    must be flattened no matter which source produced it, or a nested note under a
+    whitelisted field would serialise unredacted.
+    """
+    if isinstance(value, str):
+        return value[:limit]
+    if isinstance(value, list):
+        return "\n".join(_flatten(item, limit) for item in value)[:limit]
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)[:limit]
+    return str(value)[:limit]
+
+
+MIN_VERIFY_LEN = 4
+
+
+def leaked_kinds(payload: str, hits: Iterable[Hit]) -> dict[str, int]:
+    """Which kinds survived, by count. Never returns the values themselves."""
+    tally: dict[str, int] = {}
+    for hit in hits:
+        if len(hit.value) >= MIN_VERIFY_LEN and hit.value in payload:
+            tally[hit.kind] = tally.get(hit.kind, 0) + 1
+    return tally
 
 
 def assert_no_leaks(payload: str, values: Iterable[str]) -> None:
     """Fail loudly if any pre-redaction value still appears in ``payload``.
 
-    Used by ``--verify`` and by the test suite: the check that a redactor is
-    honest about its own output, rather than trusting that the rules fired.
+    The message deliberately carries a count only. An error that quotes the
+    surviving secret would leak it into the terminal, the log, and any CI artefact
+    -- which is the one thing this check exists to prevent.
     """
-    leaked = [value for value in values if value and len(value) > 3 and value in payload]
+    leaked = [value for value in values if value and len(value) >= MIN_VERIFY_LEN and value in payload]
     if leaked:
-        preview = ", ".join(sorted({v[:24] for v in leaked}))
-        raise LeakageError(f"{len(leaked)} raw value(s) survived redaction: {preview}")
+        raise LeakageError(f"{len(leaked)} pre-redaction value(s) survived into the output")
 
 
 class LeakageError(AssertionError):

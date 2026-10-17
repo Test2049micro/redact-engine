@@ -1,0 +1,22 @@
+[
+ {
+  "kind": "phone_cn",
+  "value": "13812345678",
+  "alias": "[phone_cn-6bb92ba4ccf6]"
+ },
+ {
+  "kind": "email",
+  "value": "li@example.com",
+  "alias": "[email-f6f2e4232d35]"
+ },
+ {
+  "kind": "credential",
+  "value": "sk-abcdef1234567890xyz",
+  "alias": "[credential-eb02bb595904]"
+ },
+ {
+  "kind": "otp",
+  "value": "830291",
+  "alias": "[otp-6229845d93ca]"
+ }
+]

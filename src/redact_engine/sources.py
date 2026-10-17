@@ -10,6 +10,7 @@ while the redaction rules do not.
 from __future__ import annotations
 
 import json
+import os
 import stat
 from collections.abc import Iterator
 from pathlib import Path
@@ -82,7 +83,8 @@ def events_from_jsonl(
     target = Path(path).expanduser()
     _check_regular(target)
     produced = 0
-    with open(target, "r", encoding="utf-8", errors="replace") as handle:
+    descriptor = os.open(str(target), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -94,8 +96,14 @@ def events_from_jsonl(
             event = {}
             for field, dotted in mapping.items():
                 value = dig(payload, dotted) if dotted else None
-                if value is not None:
-                    event[field] = value if field == "timestamp" else flatten(value)
+                if value is None:
+                    continue
+                if isinstance(value, (int, float, bool)):
+                    event[field] = value
+                else:
+                    # every non-scalar goes through flatten() so that a nested dict
+                    # or list under *any* field name reaches the redactor
+                    event[field] = flatten(value)
             yield event
             produced += 1
             if limit is not None and produced >= limit:
