@@ -74,6 +74,9 @@ which:
 
 ```bash
 pipx install redact-engine       # or: pip install redact-engine
+
+# Not on PyPI yet (name verified free as of 2026-10-17). Until the first release:
+git clone https://github.com/Test2049micro/redact-engine && cd redact-engine && pipx install .
 ```
 
 Python 3.9+, no runtime dependencies, no network calls, nothing leaves the machine.
