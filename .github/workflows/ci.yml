@@ -17,13 +17,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # the suite runs against the source tree with no install, so PYTHONPATH is
+      # required: a bare `unittest discover` fails to import the package and the
+      # root conftest.py only helps pytest
       - name: stdlib-only suite
-        run: python -m unittest discover -s tests -v
-      - name: end-to-end projection
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: install and smoke the projection
         if: matrix.python-version == '3.12'
         run: |
           pip install -e .
           redact-engine init-key --key "$RUNNER_TEMP/alias.key"
           redact-engine project --key "$RUNNER_TEMP/alias.key" --source examples/events.jsonl \
-            --out "$RUNNER_TEMP/out" --verify
-          redact-engine redact-text --key "$RUNNER_TEMP/alias.key" < examples/events.jsonl > /dev/null
+            --out "$RUNNER_TEMP/out" --verify > /dev/null
+          grep -q '\[email-' "$RUNNER_TEMP/out/safe/events.jsonl"
+          # narrowing the rules must make verification FAIL (exit 5) instead of
+          # agreeing with the caller; the non-zero code is the assertion here
+          set +e
+          redact-engine project --key "$RUNNER_TEMP/alias.key" --source examples/events.jsonl \
+            --out "$RUNNER_TEMP/out2" --kind url --verify 2> "$RUNNER_TEMP/leak.txt"
+          rc=$?
+          set -e
+          test "$rc" -eq 5
+          grep -q "LEAK CHECK FAILED" "$RUNNER_TEMP/leak.txt"
+          # and the leak message must not itself quote a secret
+          ! grep -q "li@example.com" "$RUNNER_TEMP/leak.txt"
+          test ! -s "$RUNNER_TEMP/out2/safe/events.jsonl"
