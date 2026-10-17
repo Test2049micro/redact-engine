@@ -8,6 +8,25 @@ doing (app focus, accessibility text, window titles, chat rows), and you want an
 LLM to answer questions over it. Handing it the raw stream means handing it every
 address, phone number, verification code and half-typed message in the file.
 
+## Observed on a real machine
+
+`examples/events.jsonl` through `--verify` (output is verbatim, not illustrative):
+
+```
+$ redact-engine project --key alias.key --source examples/events.jsonl --out out --verify
+{"events": 3, "aliasing": "stable", "redactions": {"credential": 1, "email": 1, "number_long": 1, "otp": 1, "phone_cn": 1}}
+
+out/safe/events.jsonl   (dir 0700, file 0600)
+{"timestamp": "2026-10-17T09:00:00", "app": "com.example.mail", "text": "reply to [email-3c97d63a591c] about the invoice for order [number_long-3e0f158ffb15]"}
+{"timestamp": "2026-10-17T09:05:00", "app": "com.example.chat", "text": "您的验证码是 [otp-3dd9eb3270c0], call [phone_cn-ee6a5086aab7]"}
+{"timestamp": "2026-10-17T09:10:00", "app": "com.example.ide", "text": "refactored src/parser.py, nothing personal; token [credential-42e9b4a3940b]"}
+```
+
+Note what did *not* survive: nothing. Note what did: the shape of each secret,
+via its kind label. That is the trade this engine makes deliberately -- a reader
+must be able to tell "there was a verification code here" from "there was nothing
+here", or the projection stops being evidence about your own history.
+
 ## Why not an existing PII library
 
 Presidio, `pii-redact`, OpenAI Privacy Filter and friends are text-level PII
