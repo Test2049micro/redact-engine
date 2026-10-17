@@ -1,0 +1,3 @@
+{"timestamp": "2026-10-17T09:00:00", "app": "com.example.mail", "text": "reply to li@example.com about the invoice for order 98765432101234"}
+{"timestamp": "2026-10-17T09:05:00", "app": "com.example.chat", "text": "您的验证码是 830291, call 13812345678"}
+{"timestamp": "2026-10-17T09:10:00", "app": "com.example.ide", "text": "refactored src/parser.py, nothing personal; token sk-abcdef1234567890xyz"}

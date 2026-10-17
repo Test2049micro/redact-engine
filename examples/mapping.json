@@ -1,0 +1,5 @@
+{
+  "timestamp": "ts",
+  "app": "app.bundleIdentifier",
+  "text": "payload.lines"
+}
