@@ -18,6 +18,7 @@ import json
 import os
 import secrets as _secrets
 import stat
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -120,13 +121,21 @@ class Redactor:
         if target.is_symlink():
             raise ValueError(f"refusing to write an identity map through a symlink: {target}")
         rows = [dict(kind=k, value=v, alias=a) for (k, v), a in self._mapping.items()]
-        # O_NOFOLLOW closes the check-then-use window: a symlink planted between the
-        # existence check and this open would otherwise overwrite any file the user
-        # can write, with the *full* identity map
-        descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(rows, handle, ensure_ascii=False, indent=1)
-        os.chmod(target, 0o600)
+        # written to a sibling temp file and renamed: this map is the only thing that
+        # reverses the aliases, so an interrupted in-place rewrite (O_TRUNC writes
+        # zero bytes first) would destroy it entirely rather than leave the previous
+        # version intact
+        descriptor, temporary = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(rows, handle, ensure_ascii=False, indent=1)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, str(target))
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
     def redact(self, text: str) -> Result:
         if not text:

@@ -12,6 +12,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from redact_engine.alias import create_key, load_key, InsecureKeyFile
@@ -157,6 +158,53 @@ class SymlinkSafetyTest(unittest.TestCase):
         with self.assertRaises((OSError, ValueError)):
             redactor._append_map(("email", "a@b.co"), "[email-1]")
         self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+
+
+class MapWriteDurabilityTest(unittest.TestCase):
+    """The identity map is the only thing that reverses the aliases.
+
+    A rewrite that truncates in place destroys the previous, perfectly good map on
+    the way to writing a new one: an interrupted run leaves nothing.
+    """
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.map = self.dir / "identity-map.json"
+
+    def test_first_write_is_owner_only(self):
+        redactor = Redactor(KEY, persist_map=self.map)
+        redactor.redact("li@example.com")
+        self.assertEqual(self.map.stat().st_mode & 0o777, 0o600)
+
+    def test_failure_mid_write_keeps_the_previous_map(self):
+        first = Redactor(KEY, persist_map=self.map)
+        first.redact("li@example.com")
+        second = Redactor(KEY, persist_map=self.map)
+        second.redact("13812345678")
+        # the state a failed rewrite must not disturb: the second redact already
+        # committed a successful write, so that is the durable baseline
+        before = self.map.read_text(encoding="utf-8")
+        with mock.patch("json.dump", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                second._append_map(("email", "other@example.com"), "[email-z]")
+        self.assertEqual(self.map.read_text(encoding="utf-8"), before,
+                         "a failed rewrite must leave the old map intact")
+        self.assertEqual([q.name for q in self.dir.iterdir()], ["identity-map.json"],
+                         "no temporary file may be left behind")
+
+    def test_symlink_planted_after_construction_is_not_written_through(self):
+        # the constructor's check is not enough: _append_map reopens the path on
+        # every new subject, so a swap that lands in between must still be refused
+        victim = self.dir / "victim.txt"
+        victim.write_text("keep", encoding="utf-8")
+        redactor = Redactor(KEY, persist_map=self.map)
+        redactor.redact("li@example.com")
+        self.map.unlink()
+        self.map.symlink_to(victim)
+        with self.assertRaises(ValueError):
+            redactor._append_map(("email", "a@b.co"), "[email-2]")
+        self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+        self.assertEqual(list(self.dir.glob("*.tmp*")), [], "no temp file may survive the refusal")
 
 
 class LeakedKindsTest(unittest.TestCase):
